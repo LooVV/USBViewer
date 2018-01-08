@@ -1,7 +1,18 @@
 #pragma once
 #include <vector>
+#include <SetupAPI.h>
 
-
+enum class DeviceState {
+	ENABLED,
+	DISABLED,
+	UNDEFINED
+};
+enum class EntryState {
+	CHECKED,
+	UNCHECKED,
+	NEW,
+	CHANGED_STATE
+};
 struct USBDeviceInfo 
 {
 	CString InstanceID;
@@ -15,9 +26,12 @@ struct USBDeviceInfo
 	CString Vid;
 	CString Pid;
 	CString Mi;
-	bool Checked = false;
+
+	DeviceState DevState;
+	EntryState EntState;
+
+	SP_DEVINFO_DATA DevInfoData;
 };
 //true::ok
-bool UpdateList(std::vector<USBDeviceInfo>& USBDevices,
-				std::vector<USBDeviceInfo>& RetiredDevices,
-				std::vector<USBDeviceInfo*>& NewDevices);
+bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices );
+DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState);

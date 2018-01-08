@@ -3,18 +3,15 @@
 #include <algorithm>
 
 #include <windows.h>
-#include <devguid.h>    // for GUID_DEVCLASS_CDROM etc
+#include <devguid.h>    
 #include <setupapi.h>
-#include <cfgmgr32.h>   // for MAX_DEVICE_ID_LEN, CM_Get_Parent and CM_Get_Device_ID
+#include <cfgmgr32.h>   
 #include <clocale>
 #define INITGUID
 #include <tchar.h>
-#include <stdio.h>
 
 #pragma comment(lib, "SetupAPI")
 
-
-// include DEVPKEY_Device_BusReportedDeviceDesc from WinDDK\7600.16385.1\inc\api\devpropdef.h
 #ifdef DEFINE_DEVPROPKEY
 #undef DEFINE_DEVPROPKEY
 #endif
@@ -33,213 +30,247 @@ DEFINE_DEVPROPKEY(DEVPKEY_Device_Manufacturer, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,
 
 #define ARRAY_SIZE(arr)     (sizeof(arr)/sizeof(arr[0]))
 
+#define USB_ENUMERATOR  L"USB"
 
-static bool UpdateInfo(std::vector<USBDeviceInfo>& Devices,
-	std::vector<USBDeviceInfo>& NewDevices);
+static HDEVINFO hDevInfo = INVALID_HANDLE_VALUE;
 
-static std::vector<USBDeviceInfo> EraseRetired(std::vector<USBDeviceInfo>& USBDevices);
-					
-
-#define CLSID_STR_WEIUSB (L"{A5DCBF10-6530-11D2-901F-00C04FB951ED}")
-
- // List all USB devices with some additional information
-bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices, std::vector<USBDeviceInfo>& NewDevices )
+static bool operator==(const SP_DEVINFO_DATA& lhv, const SP_DEVINFO_DATA& rhv)
 {
-	GUID     DevClass;
-	CLSIDFromString(CLSID_STR_WEIUSB, &DevClass);
+	return lhv.cbSize == rhv.cbSize &&
+			lhv.ClassGuid == rhv.ClassGuid &&
+			lhv.DevInst == rhv.DevInst &&
+			lhv.Reserved == rhv.Reserved;
+}
 
-	LPCTSTR pszEnumerator = L"USB";
-	unsigned i, j;
+static DeviceState GetDeviceState(DWORD DeviceInstance)
+{
+	ULONG devStatus, devProblemCode;
+	switch (CM_Get_DevNode_Status(&devStatus, &devProblemCode, DeviceInstance, 0))
+	{
+	case CR_SUCCESS:
+	{
+		if (devStatus & DN_STARTED)
+		{
+			return DeviceState::ENABLED;
+		}
+		else if (devProblemCode & CM_PROB_DISABLED)
+		{
+			return DeviceState::DISABLED;
+		}
+	} break;
+
+	default:
+	{
+		// some error
+	}
+	}
+	return DeviceState::UNDEFINED;
+}
+
+static void FillDetailInfo(USBDeviceInfo& Info, HDEVINFO& hDevInfo, SP_DEVINFO_DATA& DeviceInfoData, TCHAR szDeviceInstanceID[MAX_DEVICE_ID_LEN])
+{ 
 	DWORD dwSize, dwPropertyRegDataType;
-	DEVPROPTYPE ulPropertyType;
-	CONFIGRET status;
-	HDEVINFO hDevInfo;
-	SP_DEVINFO_DATA DeviceInfoData;
-	const static LPCTSTR arPrefix[3] = { TEXT("VID_"), TEXT("PID_"), TEXT("MI_") };
-	TCHAR szDeviceInstanceID[MAX_DEVICE_ID_LEN];
 	TCHAR szDesc[1024], szHardwareIDs[4096];
 	WCHAR szBuffer[4096];
+	DEVPROPTYPE ulPropertyType;
 	LPTSTR pszToken, pszNextToken;
 	TCHAR szVid[MAX_DEVICE_ID_LEN], szPid[MAX_DEVICE_ID_LEN], szMi[MAX_DEVICE_ID_LEN];
+	const static LPCTSTR arPrefix[3] = { TEXT("VID_"), TEXT("PID_"), TEXT("MI_") };
 
 
+	if (SetupDiGetDeviceRegistryProperty(hDevInfo, &DeviceInfoData, SPDRP_DEVICEDESC,
+		&dwPropertyRegDataType, (BYTE*)szDesc,
+		sizeof(szDesc),   // The size, in bytes
+		&dwSize))
+		Info.Description = { szDesc };
+
+	if (SetupDiGetDeviceRegistryProperty(hDevInfo, &DeviceInfoData, SPDRP_HARDWAREID,
+		&dwPropertyRegDataType, (BYTE*)szHardwareIDs,
+		sizeof(szHardwareIDs),    // The size, in bytes
+		&dwSize)) {
+		LPCTSTR pszId;
+
+		//_tprintf(TEXT("    Hardware IDs:\n"));
+		for (pszId = szHardwareIDs;
+			*pszId != TEXT('\0') && pszId + dwSize / sizeof(TCHAR) <= szHardwareIDs + ARRAYSIZE(szHardwareIDs);
+			pszId += lstrlen(pszId) + 1) {
+
+			Info.HardwareIDs.push_back(pszId);
+		}
+	}
+
+	// Retreive the device description as reported by the device itself
+	// On Vista and earlier, we can use only SPDRP_DEVICEDESC
+	// On Windows 7, the information we want ("Bus reported device description") is
+	// accessed through DEVPKEY_Device_BusReportedDeviceDesc
+
+	if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_BusReportedDeviceDesc,
+		&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0)) {
+
+		if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_BusReportedDeviceDesc,
+			&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
+		{
+			Info.BusReportedDeviceDescription = szBuffer;
+		}
+		if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_Manufacturer,
+			&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
+		{
+			Info.Manufacturer = szBuffer;
+		}
+		if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_FriendlyName,
+			&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
+		{
+			Info.FriendlyName = szBuffer;
+		}
+		if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_LocationInfo,
+			&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
+		{
+			Info.LocationInfo = szBuffer;
+		}
+
+		if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_DeviceDisplay_Category,
+			&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
+		{
+			Info.DisplayCategory = szBuffer;
+		}
+	}
+
+	pszToken = _tcstok_s(szDeviceInstanceID, TEXT("\\#&"), &pszNextToken);
+	while (pszToken != NULL) {
+		szVid[0] = TEXT('\0');
+		szPid[0] = TEXT('\0');
+		szMi[0] = TEXT('\0');
+		for (unsigned int j = 0; j < 3; j++) {
+			if (_tcsncmp(pszToken, arPrefix[j], lstrlen(arPrefix[j])) == 0) {
+				switch (j) {
+				case 0:
+					_tcscpy_s(szVid, ARRAY_SIZE(szVid), pszToken);
+					break;
+				case 1:
+					_tcscpy_s(szPid, ARRAY_SIZE(szPid), pszToken);
+					break;
+				case 2:
+					_tcscpy_s(szMi, ARRAY_SIZE(szMi), pszToken);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+		if (szVid[0] != TEXT('\0'))
+			Info.Vid = szVid + 4;
+		if (szPid[0] != TEXT('\0'))
+			Info.Pid = szPid + 4;
+		if (szMi[0] != TEXT('\0'))
+			Info.Mi = szMi + 3;
+		pszToken = _tcstok_s(NULL, TEXT("\\#&"), &pszNextToken);
+	}
+}
+
+// List all USB devices with some additional information                  
+bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices )
+{
+	unsigned i;
+	CONFIGRET status;
+	SP_DEVINFO_DATA DeviceInfoData;
+	TCHAR szDeviceInstanceID[MAX_DEVICE_ID_LEN];
+	
 	// List all connected USB devices
-	hDevInfo = SetupDiGetClassDevs(&DevClass, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE); //DIGCF_ALLCLASSES | DIGCF_PRESENT);
+	if(hDevInfo != INVALID_HANDLE_VALUE)
+		SetupDiDestroyDeviceInfoList(hDevInfo);
+
+	hDevInfo = SetupDiGetClassDevs(NULL, USB_ENUMERATOR, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
 	if (hDevInfo == INVALID_HANDLE_VALUE)
 		return false;
 	
+	DeviceInfoData.cbSize = sizeof(DeviceInfoData);
 	
-	// Find the ones that are driverless
 	for (i = 0; ; i++) 
-	{		
-		DeviceInfoData.cbSize = sizeof(DeviceInfoData);
+	{
+		//getting device info
 		if (!SetupDiEnumDeviceInfo(hDevInfo, i, &DeviceInfoData))
 			break;
 
+		//getting ID
 		status = CM_Get_Device_ID(DeviceInfoData.DevInst, szDeviceInstanceID, MAX_PATH, 0);
 		if (status != CR_SUCCESS)
 			continue;
 
 		// Display device instance ID
-		CString ID { szDeviceInstanceID };
-
-
+		CString ID{ szDeviceInstanceID };
+		DeviceState state = GetDeviceState(DeviceInfoData.DevInst);
+		
 		auto Device = std::find_if(USBDevices.begin(), USBDevices.end(),
-						[&](const USBDeviceInfo& Info) {
-							return Info.InstanceID == ID;
-						});
-		//устройство осталось в списке
+									[&](const USBDeviceInfo& Info) {
+										return Info.InstanceID == ID;
+									});
+		//device still in list
 		if (Device != USBDevices.end())
 		{
-			Device->Checked = true;
+			//check state change
+			if (Device->DevState == state)
+			{
+				Device->EntState = EntryState::CHECKED;
+			}
+			else
+			{
+				Device->EntState = EntryState::CHANGED_STATE;
+				Device->DevState = state;
+			}
+			//update DevInfoData if needed
+			if (!(Device->DevInfoData == DeviceInfoData))
+			{
+				Device->DevInfoData = DeviceInfoData;
+			}
 			continue;
 		}
-		
-		//новое устройство, нужно заполнить информацией
+
+		//its new device, need to fill info
 		USBDeviceInfo Info;
-		//TODO: не уверен, что у CString есть move семантика
-		Info.InstanceID = std::move(ID);
+		Info.InstanceID = ID;
+		Info.DevState = state;
+		Info.EntState = EntryState::NEW;
+		Info.DevInfoData = DeviceInfoData;
 
+		FillDetailInfo(Info, hDevInfo, DeviceInfoData, szDeviceInstanceID);
 
-		if (SetupDiGetDeviceRegistryProperty(hDevInfo, &DeviceInfoData, SPDRP_DEVICEDESC,
-		  									 &dwPropertyRegDataType, (BYTE*)szDesc,
-		  									 sizeof(szDesc),   // The size, in bytes
-											 &dwSize))
-			Info.Description = { szDesc };
-
-		if (SetupDiGetDeviceRegistryProperty(hDevInfo, &DeviceInfoData, SPDRP_HARDWAREID,
-			&dwPropertyRegDataType, (BYTE*)szHardwareIDs,
-			sizeof(szHardwareIDs),    // The size, in bytes
-			&dwSize)) {
-			LPCTSTR pszId;
-
-			//_tprintf(TEXT("    Hardware IDs:\n"));
-			for (pszId = szHardwareIDs;
-				*pszId != TEXT('\0') && pszId + dwSize / sizeof(TCHAR) <= szHardwareIDs + ARRAYSIZE(szHardwareIDs);
-				pszId += lstrlen(pszId) + 1) {
-
-				Info.HardwareIDs.push_back(pszId);
-			}
-		}
-
-		// Retreive the device description as reported by the device itself
-		// On Vista and earlier, we can use only SPDRP_DEVICEDESC
-		// On Windows 7, the information we want ("Bus reported device description") is
-		// accessed through DEVPKEY_Device_BusReportedDeviceDesc
-
-		if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_BusReportedDeviceDesc,
-			&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0)) {
-
-			if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_BusReportedDeviceDesc,
-				&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
-			{
-				Info.BusReportedDeviceDescription = szBuffer;
-			}
-			if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_Manufacturer,
-				&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
-			{
-				Info.Manufacturer = szBuffer;
-			}
-			if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_FriendlyName,
-				&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0)) 
-			{
-				Info.FriendlyName = szBuffer;
-			}
-			if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_LocationInfo,
-				&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0)) 
-			{
-				Info.LocationInfo = szBuffer;
-			}
-
-			if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_DeviceDisplay_Category,
-				&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0))
-			{
-				Info.DisplayCategory = szBuffer;
-			}
-		}
-
-		pszToken = _tcstok_s(szDeviceInstanceID, TEXT("\\#&"), &pszNextToken);
-		while (pszToken != NULL) {
-			szVid[0] = TEXT('\0');
-			szPid[0] = TEXT('\0');
-			szMi[0] = TEXT('\0');
-			for (j = 0; j < 3; j++) {
-				if (_tcsncmp(pszToken, arPrefix[j], lstrlen(arPrefix[j])) == 0) {
-					switch (j) {
-					case 0:
-						_tcscpy_s(szVid, ARRAY_SIZE(szVid), pszToken);
-						break;
-					case 1:
-						_tcscpy_s(szPid, ARRAY_SIZE(szPid), pszToken);
-						break;
-					case 2:
-						_tcscpy_s(szMi, ARRAY_SIZE(szMi), pszToken);
-						break;
-					default:
-						break;
-					}
-				}
-			}
-			if (szVid[0] != TEXT('\0'))
-				Info.Vid = szVid + 4;
-			if (szPid[0] != TEXT('\0'))
-				Info.Pid = szPid + 4;
-			if (szMi[0] != TEXT('\0'))
-				Info.Mi = szMi + 3;
-			pszToken = _tcstok_s(NULL, TEXT("\\#&"), &pszNextToken);
-		}
-
-
-		//записываем в основной список
-		NewDevices.push_back(std::move(Info));
+		USBDevices.push_back(std::move(Info));
 	}
-
+	//SetupDiDestroyDeviceInfoList(hDevInfo);
 	return true;
 }
 
-bool UpdateList(std::vector<USBDeviceInfo>& USBDevices,
-				std::vector<USBDeviceInfo>& RetiredDevices,
-				std::vector<USBDeviceInfo*>& NewDevicesRef)
+DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState)
 {
-	std::vector<USBDeviceInfo> NewDevices;
-	if (!UpdateInfo(USBDevices, NewDevices))
+	if (NewState == DeviceState::UNDEFINED)
+		return 1;
+	if (Info.DevState == NewState)
+		return 0;
+
+	
+	if (hDevInfo == INVALID_HANDLE_VALUE)
 		return false;
 
-	RetiredDevices = EraseRetired(USBDevices);
-	//на этом этапе старые приборы в RetiredDevices
+	SP_PROPCHANGE_PARAMS params;
 
-	for (auto It = NewDevices.rbegin(); It != NewDevices.rend(); ++It)
-	{
-		USBDevices.push_back(std::move(*It));
-		NewDevicesRef.push_back(&(USBDevices.back()));
+	params.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+	params.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+
+	if( NewState == DeviceState::DISABLED )
+		params.StateChange = DICS_DISABLE;
+	else if(NewState == DeviceState::ENABLED)
+		params.StateChange = DICS_ENABLE;
+
+	params.Scope = DICS_FLAG_GLOBAL;
+	DWORD Error = 0;
+
+	// setup proper parameters            
+	if (!SetupDiSetClassInstallParams(hDevInfo, &(Info.DevInfoData), &params.ClassInstallHeader, sizeof(params))) {
+		Error = GetLastError();
 	}
-	//новые устройства перенесены в USBDevices, а в NewDevicesRef ссылки на них
-	//обновляем метки
-	for (auto& Item : USBDevices) {
-		Item.Checked = false;
+	// use parameters
+	if (!SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, hDevInfo, &(Info.DevInfoData))) {
+		Error = GetLastError(); // error here
 	}
-
-	return true;
-}
-
-std::vector<USBDeviceInfo> EraseRetired(std::vector<USBDeviceInfo>& USBDevices)
-{
-	std::vector<USBDeviceInfo> RetiredDevices;
-	//0 всего = 0 старых
-	if (USBDevices.size() == 0)
-		return RetiredDevices;
-
-	//в процессе обхода нужно удалять элементы, поэтому обратный обход
-	for (size_t i = USBDevices.size() - 1; i >= 0 && i < USBDevices.size(); --i)
-	{
-
-		if (! USBDevices[i].Checked)
-		{
-			RetiredDevices.push_back(std::move(USBDevices[i]));
-
-			USBDevices.erase(USBDevices.begin() + i);
-		}
-	}
-
-	return RetiredDevices;
+	return Error;
 }
