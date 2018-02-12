@@ -31,6 +31,14 @@ struct USBDeviceInfo
 	EntryState EntState;
 
 	SP_DEVINFO_DATA DevInfoData;
+
+	const TCHAR* DeviceInfoString() const
+	{
+		if (BusReportedDeviceDescription != "")
+			return (TCHAR*)BusReportedDeviceDescription.GetString();
+		else
+			return (TCHAR*)Description.GetString();
+	}
 };
 //true::ok
 bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices );

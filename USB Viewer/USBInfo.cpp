@@ -61,6 +61,7 @@ static DeviceState GetDeviceState(DWORD DeviceInstance)
 
 	default:
 	{
+		MessageBox(NULL, L"Error", L"errpr",0);
 		// some error
 	}
 	}
