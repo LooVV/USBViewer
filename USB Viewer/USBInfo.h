@@ -2,6 +2,8 @@
 #include <vector>
 #include <SetupAPI.h>
 
+namespace USB{
+
 enum class DeviceState {
 	ENABLED,
 	DISABLED,
@@ -13,6 +15,16 @@ enum class EntryState {
 	NEW,
 	CHANGED_STATE
 };
+enum class ChangeStateResult
+{
+	OK,
+	NEED_ADMIN,
+	NOT_DISABLEABLE,
+	WRONG_REQUEST,
+	NEED_USE_UPDATE,
+	UNKNOWN_ERROR
+};
+
 struct USBDeviceInfo 
 {
 	CString InstanceID;
@@ -27,8 +39,6 @@ struct USBDeviceInfo
 	CString Pid;
 	CString Mi;
 
-	ULONG devStatus;
-
 	DeviceState DevState;
 	EntryState EntState;
 
@@ -36,12 +46,19 @@ struct USBDeviceInfo
 
 	const TCHAR* DeviceInfoString() const
 	{
-		if (BusReportedDeviceDescription != "")
-			return (TCHAR*)BusReportedDeviceDescription.GetString();
+		if ( !BusReportedDeviceDescription.IsEmpty())
+			return BusReportedDeviceDescription.GetString();
 		else
-			return (TCHAR*)Description.GetString();
+			return Description.GetString();
 	}
 };
-//true::ok
-bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices );
-DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState);
+
+using DeviceInfoSet = std::vector<USBDeviceInfo>;
+
+// true - success
+bool UpdateInfo(DeviceInfoSet& USBDevices);
+ChangeStateResult ChangeDevState(USBDeviceInfo& Info, DeviceState NewState);
+void ReleaseDevs();
+
+
+}

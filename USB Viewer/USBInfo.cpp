@@ -32,7 +32,9 @@ DEFINE_DEVPROPKEY(DEVPKEY_Device_Manufacturer, 0xa45c254e, 0xdf1c, 0x4efd, 0x80,
 
 #define USB_ENUMERATOR  L"USB"
 
+
 static HDEVINFO hDevInfo = INVALID_HANDLE_VALUE;
+
 
 static bool operator==(const SP_DEVINFO_DATA& lhv, const SP_DEVINFO_DATA& rhv)
 {
@@ -42,34 +44,26 @@ static bool operator==(const SP_DEVINFO_DATA& lhv, const SP_DEVINFO_DATA& rhv)
 			lhv.Reserved == rhv.Reserved;
 }
 
+namespace USB{
+
 static DeviceState GetDeviceState(DWORD DeviceInstance)
 {
 	ULONG devStatus, devProblemCode;
-	auto ret = CM_Get_DevNode_Status(&devStatus, &devProblemCode, DeviceInstance, 0);
-	switch (ret)
-	{
-	case CR_SUCCESS:
+
+	if (CM_Get_DevNode_Status(&devStatus,
+		&devProblemCode, DeviceInstance, 0) == CR_SUCCESS)
 	{
 		if (devStatus & DN_STARTED)
-		{
 			return DeviceState::ENABLED;
-		}
 		else if (devProblemCode & CM_PROB_DISABLED)
-		{
 			return DeviceState::DISABLED;
-		}
-	} break;
+	}
 
-	default:
-	{
-		MessageBox(NULL, L"Error", L"errpr",0);
-		// some error
-	}
-	}
-	return DeviceState::UNDEFINED;
+	return USB::DeviceState::UNDEFINED;
 }
 
-static void FillDetailInfo(USBDeviceInfo& Info, HDEVINFO& hDevInfo, SP_DEVINFO_DATA& DeviceInfoData, TCHAR szDeviceInstanceID[MAX_DEVICE_ID_LEN])
+static void FillDetailInfo(USB::USBDeviceInfo& Info, HDEVINFO& hDevInfo,
+							SP_DEVINFO_DATA& DeviceInfoData, TCHAR szDeviceInstanceID[MAX_DEVICE_ID_LEN])
 { 
 	DWORD dwSize, dwPropertyRegDataType;
 	TCHAR szDesc[1024], szHardwareIDs[4096];
@@ -100,10 +94,6 @@ static void FillDetailInfo(USBDeviceInfo& Info, HDEVINFO& hDevInfo, SP_DEVINFO_D
 		}
 	}
 
-	// Retreive the device description as reported by the device itself
-	// On Vista and earlier, we can use only SPDRP_DEVICEDESC
-	// On Windows 7, the information we want ("Bus reported device description") is
-	// accessed through DEVPKEY_Device_BusReportedDeviceDesc
 
 	if (SetupDiGetDevicePropertyW(hDevInfo, &DeviceInfoData, &DEVPKEY_Device_BusReportedDeviceDesc,
 		&ulPropertyType, (BYTE*)szBuffer, sizeof(szBuffer), &dwSize, 0)) {
@@ -169,22 +159,23 @@ static void FillDetailInfo(USBDeviceInfo& Info, HDEVINFO& hDevInfo, SP_DEVINFO_D
 }
 
 // List all USB devices with some additional information                  
-bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices )
+bool UpdateInfo(USB::DeviceInfoSet& USBDevices )
 {
 	unsigned i;
 	CONFIGRET status;
 	SP_DEVINFO_DATA DeviceInfoData;
 	TCHAR szDeviceInstanceID[MAX_DEVICE_ID_LEN];
+	DeviceInfoData.cbSize = sizeof(DeviceInfoData);
 	
-	// List all connected USB devices
-	if(hDevInfo != INVALID_HANDLE_VALUE)
-		SetupDiDestroyDeviceInfoList(hDevInfo);
+	if (hDevInfo != INVALID_HANDLE_VALUE)
+		ReleaseDevs();
 
+
+	// List all connected USB devices
 	hDevInfo = SetupDiGetClassDevs(NULL, USB_ENUMERATOR, NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
 	if (hDevInfo == INVALID_HANDLE_VALUE)
 		return false;
 	
-	DeviceInfoData.cbSize = sizeof(DeviceInfoData);
 	
 	for (i = 0; ; i++) 
 	{
@@ -197,12 +188,13 @@ bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices )
 		if (status != CR_SUCCESS)
 			continue;
 
-		// Display device instance ID
+		// Get device instance ID
 		CString ID{ szDeviceInstanceID };
 		DeviceState state = GetDeviceState(DeviceInfoData.DevInst);
 		
 		auto Device = std::find_if(USBDevices.begin(), USBDevices.end(),
-									[&](const USBDeviceInfo& Info) {
+									[&](const USB::USBDeviceInfo& Info) 
+									{
 										return Info.InstanceID == ID;
 									});
 		//device still in list
@@ -211,13 +203,14 @@ bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices )
 			//check state change
 			if (Device->DevState == state)
 			{
-				Device->EntState = EntryState::CHECKED;
+				Device->EntState = USB::EntryState::CHECKED;
 			}
 			else
 			{
-				Device->EntState = EntryState::CHANGED_STATE;
+				Device->EntState = USB::EntryState::CHANGED_STATE;
 				Device->DevState = state;
 			}
+
 			//update DevInfoData if needed
 			if (!(Device->DevInfoData == DeviceInfoData))
 			{
@@ -227,30 +220,34 @@ bool UpdateInfo(std::vector<USBDeviceInfo>& USBDevices )
 		}
 
 		//its new device, need to fill info
-		USBDeviceInfo Info;
+		USB::USBDeviceInfo Info;
 		Info.InstanceID = ID;
 		Info.DevState = state;
-		Info.EntState = EntryState::NEW;
+		Info.EntState = USB::EntryState::NEW;
 		Info.DevInfoData = DeviceInfoData;
 
 		FillDetailInfo(Info, hDevInfo, DeviceInfoData, szDeviceInstanceID);
 
 		USBDevices.push_back(std::move(Info));
 	}
-	//SetupDiDestroyDeviceInfoList(hDevInfo);
+	
 	return true;
 }
 
-DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState)
+void ReleaseDevs()
 {
-	if (NewState == DeviceState::UNDEFINED)
-		return 1;
-	if (Info.DevState == NewState)
-		return 0;
+	SetupDiDestroyDeviceInfoList(hDevInfo);
+	hDevInfo = INVALID_HANDLE_VALUE;
+}
 
-	
+ChangeStateResult ChangeDevState(USB::USBDeviceInfo& Info, USB::DeviceState NewState)
+{
+	if (NewState == DeviceState::UNDEFINED || 
+					Info.DevState == NewState)
+		return ChangeStateResult::WRONG_REQUEST;
+
 	if (hDevInfo == INVALID_HANDLE_VALUE)
-		return false;
+		return ChangeStateResult::NEED_USE_UPDATE;
 
 	SP_PROPCHANGE_PARAMS params;
 
@@ -259,7 +256,7 @@ DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState)
 
 	if( NewState == DeviceState::DISABLED )
 		params.StateChange = DICS_DISABLE;
-	else if(NewState == DeviceState::ENABLED)
+	else 
 		params.StateChange = DICS_ENABLE;
 
 	params.Scope = DICS_FLAG_GLOBAL;
@@ -269,19 +266,26 @@ DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState)
 	if (!SetupDiSetClassInstallParams(hDevInfo, &(Info.DevInfoData), &params.ClassInstallHeader, sizeof(params))) 
 	{
 		Error = GetLastError();
-		return Error;
 	}
 
 	// use parameters
 	if (!SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, hDevInfo, &(Info.DevInfoData))) {
 		Error = GetLastError(); // error here
 	}
-	return Error;
+	switch (Error)
+	{
+	case 0:
+		return ChangeStateResult::OK;
+		
+	case ERROR_ACCESS_DENIED:
+		return ChangeStateResult::NEED_ADMIN;
 
-	/*auto ret = CM_Disable_DevNode(Info.DevInfoData.DevInst, 0);
-	if (ret == CR_SUCCESS)
-		return 0;
-	else {
-		return ret;
-	}*/
+	case ERROR_NOT_DISABLEABLE:
+		return ChangeStateResult::NOT_DISABLEABLE;
+	
+	default:
+		return ChangeStateResult::UNKNOWN_ERROR;
+	}
+}
+
 }
