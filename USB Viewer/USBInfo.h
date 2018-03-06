@@ -27,6 +27,8 @@ struct USBDeviceInfo
 	CString Pid;
 	CString Mi;
 
+	ULONG devStatus;
+
 	DeviceState DevState;
 	EntryState EntState;
 

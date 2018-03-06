@@ -45,7 +45,8 @@ static bool operator==(const SP_DEVINFO_DATA& lhv, const SP_DEVINFO_DATA& rhv)
 static DeviceState GetDeviceState(DWORD DeviceInstance)
 {
 	ULONG devStatus, devProblemCode;
-	switch (CM_Get_DevNode_Status(&devStatus, &devProblemCode, DeviceInstance, 0))
+	auto ret = CM_Get_DevNode_Status(&devStatus, &devProblemCode, DeviceInstance, 0);
+	switch (ret)
 	{
 	case CR_SUCCESS:
 	{
@@ -91,7 +92,6 @@ static void FillDetailInfo(USBDeviceInfo& Info, HDEVINFO& hDevInfo, SP_DEVINFO_D
 		&dwSize)) {
 		LPCTSTR pszId;
 
-		//_tprintf(TEXT("    Hardware IDs:\n"));
 		for (pszId = szHardwareIDs;
 			*pszId != TEXT('\0') && pszId + dwSize / sizeof(TCHAR) <= szHardwareIDs + ARRAYSIZE(szHardwareIDs);
 			pszId += lstrlen(pszId) + 1) {
@@ -264,14 +264,24 @@ DWORD ChangeDevState(USBDeviceInfo& Info, DeviceState NewState)
 
 	params.Scope = DICS_FLAG_GLOBAL;
 	DWORD Error = 0;
-
+	
 	// setup proper parameters            
-	if (!SetupDiSetClassInstallParams(hDevInfo, &(Info.DevInfoData), &params.ClassInstallHeader, sizeof(params))) {
+	if (!SetupDiSetClassInstallParams(hDevInfo, &(Info.DevInfoData), &params.ClassInstallHeader, sizeof(params))) 
+	{
 		Error = GetLastError();
+		return Error;
 	}
+
 	// use parameters
 	if (!SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, hDevInfo, &(Info.DevInfoData))) {
 		Error = GetLastError(); // error here
 	}
 	return Error;
+
+	/*auto ret = CM_Disable_DevNode(Info.DevInfoData.DevInst, 0);
+	if (ret == CR_SUCCESS)
+		return 0;
+	else {
+		return ret;
+	}*/
 }
